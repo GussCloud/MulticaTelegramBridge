@@ -133,6 +133,18 @@ async function main(): Promise<void> {
     void bot.launch(() => logger.info('Telegram configurado em modo polling'));
   }
 
+  // Registra a lista de comandos na UI nativa do Telegram (menu "/").
+  await bot.telegram
+    .setMyCommands([
+      { command: 'menu', description: 'Abrir o menu de botões' },
+      { command: 'agentes', description: 'Listar agentes' },
+      { command: 'squads', description: 'Listar squads' },
+      { command: 'issues', description: 'Listar issues' },
+      { command: 'status', description: 'Status do bridge' },
+      { command: 'help', description: 'Ajuda' },
+    ])
+    .catch(() => undefined);
+
   // -------------------- 7. WebSocket + fallback por polling --------------------
   if (config.BRIDGE_ENABLE_WEBSOCKET) {
     websocket.connect();

@@ -113,9 +113,12 @@ export function formatIssueDetail(issue: Issue): string {
 export const HELP_TEXT = [
   '🤖 Multica Telegram Bridge',
   '',
+  '💡 Dica: use /menu para navegar por botões (sem decorar comandos).',
+  '',
   'Comandos disponíveis:',
   '',
-  '/start — inicia e mostra ajuda',
+  '/start — inicia e mostra o menu',
+  '/menu — abre o menu de botões',
   '/help — esta ajuda',
   '/status — status do bridge e conexão com o Multica',
   '',

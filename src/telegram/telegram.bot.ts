@@ -3,6 +3,8 @@ import type { AppConfig } from '../config/env.js';
 import type { Repository } from '../storage/repository.js';
 import { TelegramAuth } from './telegram.auth.js';
 import { registerCommands, type CommandServices } from './telegram.commands.js';
+import { registerMenu } from './telegram.menu.handlers.js';
+import { PendingActionStore } from '../storage/pending.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -44,7 +46,11 @@ export function createBot(
     }
   });
 
+  // Comandos (slash) primeiro; em seguida os menus de botões e o handler de
+  // texto das jornadas (que deve ser o último a rodar).
   registerCommands(bot, services);
+  const pending = new PendingActionStore();
+  registerMenu(bot, services, pending);
 
   // Tratamento global de erros do Telegraf (não vaza detalhes ao usuário).
   bot.catch((err, ctx) => {

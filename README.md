@@ -218,12 +218,36 @@ Todas as variáveis estão documentadas em [`.env.example`](./.env.example). As 
 
 ---
 
+## Menu interativo (botões)
+
+A forma recomendada de uso é o **menu por botões**, sem precisar decorar comandos. Envie **/menu** (ou /start) e navegue por sub-menus com botões e opção **⬅️ Voltar**:
+
+```text
+/menu
+ ├─ 🤖 Agentes        → lista agentes
+ ├─ 👥 Squads         → lista squads
+ ├─ 📌 Issues
+ │    ├─ 📋 Todas / por status (Backlog, A fazer, Em andamento, …)
+ │    └─ 🆕 Nova issue → escolher 🤖 Agente / 👥 Squad → escolher item
+ │                       → enviar "Título | Descrição | prioridade"
+ ├─ 💬 Chat           → escolher agente → digitar mensagem(ns)
+ │                       (⏹️ Encerrar chat para sair)
+ ├─ 🔄 Atualizar      → recarrega cache de agentes/squads
+ ├─ 📊 Status         → status do bridge
+ └─ ❓ Ajuda
+```
+
+Como funciona a jornada (exemplo do Chat, conforme solicitado): ao tocar em **💬 Chat**, o bot lista os agentes como botões; ao escolher um, a conversa fica pronta — **qualquer mensagem de texto** seguinte é enviada ao agente até você tocar em **⏹️ Encerrar chat**. As issues seguem a mesma ideia (seleção por botões e, então, entrada dos dados).
+
+> Os comandos de barra abaixo continuam funcionando para quem prefere digitá-los.
+
 ## Comandos do Telegram
 
 ### Básicos
 
 ```text
-/start     Inicia e mostra a ajuda
+/start     Inicia e mostra o menu de botões
+/menu      Abre o menu de botões
 /help      Lista de comandos
 /status    Status do bridge e da conexão com o Multica
 ```
@@ -334,7 +358,9 @@ src/
     env.ts                     # Validação do .env com Zod
   telegram/
     telegram.bot.ts            # Instância Telegraf + middleware de auth
-    telegram.commands.ts       # Handlers dos comandos
+    telegram.commands.ts       # Handlers dos comandos (slash)
+    telegram.menu.ts           # Menus/sub-menus (inline keyboards)
+    telegram.menu.handlers.ts  # Navegação por botões + jornadas (callback/texto)
     telegram.auth.ts           # Autorização + rate limit
     telegram.formatter.ts      # Formatação das mensagens
   multica/
@@ -351,6 +377,7 @@ src/
   storage/
     cache.ts                   # Cache TTL em memória
     repository.ts              # Idempotência, sessions, rate limit
+    pending.ts                 # Estado das jornadas interativas (botões)
   utils/
     logger.ts                  # pino + mascaramento de segredos
     normalize.ts               # Normalização e geração de aliases

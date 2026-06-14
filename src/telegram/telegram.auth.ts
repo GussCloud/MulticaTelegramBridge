@@ -48,8 +48,12 @@ export class TelegramAuth {
       }
     }
 
-    // Rate limit por usuário.
-    if (!this.repo.allowRequest(userId, this.config.BRIDGE_RATE_LIMIT_PER_MINUTE)) {
+    // Rate limit por usuário. Cliques em botões (callback_query) são leves e
+    // ficam isentos para não atrapalhar a navegação nos menus.
+    if (
+      ctx.updateType !== 'callback_query' &&
+      !this.repo.allowRequest(userId, this.config.BRIDGE_RATE_LIMIT_PER_MINUTE)
+    ) {
       logger.warn({ userId }, 'Usuário atingiu o rate limit');
       return { allowed: false, reason: 'rate' };
     }

@@ -42,17 +42,34 @@ export class ChatService {
       throw new ValidationError('❌ O chat direto só está disponível para agentes, não squads.');
     }
 
-    // Reutiliza a session existente ou cria uma nova.
-    let sessionId = this.repo.getChatSession(telegramUserId, resolved.id);
-    if (!sessionId) {
-      const session = await this.client.createChatSession(resolved.id, `Telegram ${telegramUserId}`);
-      sessionId = session.id;
-      this.repo.setChatSession(telegramUserId, resolved.id, sessionId);
+    return this.sendToAgent(telegramUserId, resolved.id, resolved.name, message);
+  }
+
+  /**
+   * Envia uma mensagem para um agente já identificado (fluxo por botões).
+   * Cria ou reutiliza a chat session por (usuário do Telegram + agente).
+   */
+  async sendToAgent(
+    telegramUserId: number,
+    agentId: string,
+    agentName: string,
+    message: string,
+  ): Promise<{ sessionId: string; agentName: string; messages: ChatMessage[] }> {
+    if (!message.trim()) {
+      throw new ValidationError('❌ Escreva a mensagem para o agente.');
     }
 
-    await this.client.sendChatMessage(sessionId, message);
+    // Reutiliza a session existente ou cria uma nova.
+    let sessionId = this.repo.getChatSession(telegramUserId, agentId);
+    if (!sessionId) {
+      const session = await this.client.createChatSession(agentId, `Telegram ${telegramUserId}`);
+      sessionId = session.id;
+      this.repo.setChatSession(telegramUserId, agentId, sessionId);
+    }
+
+    await this.client.sendChatMessage(sessionId, message.trim());
     const messages = await this.client.listChatMessages(sessionId);
 
-    return { sessionId, agentName: resolved.name, messages };
+    return { sessionId, agentName, messages };
   }
 }
