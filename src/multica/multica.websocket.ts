@@ -1,4 +1,5 @@
 import { WebSocket } from 'ws';
+import type { IncomingMessage } from 'node:http';
 import type { AppConfig } from '../config/env.js';
 import { logger } from '../utils/logger.js';
 
@@ -6,6 +7,8 @@ export interface MulticaEvent {
   id?: string;
   type?: string;
   workspace_id?: string;
+  actor_id?: string;
+  actor_type?: string;
   payload?: Record<string, unknown>;
   [key: string]: unknown;
 }
@@ -13,15 +16,22 @@ export interface MulticaEvent {
 type EventHandler = (event: MulticaEvent) => void | Promise<void>;
 
 /**
- * Client WebSocket do Multica (planejamento 5.3 / seção 11).
+ * Client WebSocket do Multica (endpoint `/ws`).
  *
- * - conecta no endpoint `/ws` com autenticação por token;
- * - reconecta automaticamente com backoff exponencial;
- * - filtra eventos por workspace quando o ID está configurado;
- * - mantém a conexão viva com ping periódico.
+ * Protocolo (modo token/PAT, conforme o backend multica-ai/multica):
+ *  1. Conecta em `<MULTICA_WS_URL>?workspace_slug=<slug>&client_platform=<p>`
+ *     — o token NUNCA vai na URL (seria registrado por proxies/CDNs).
+ *  2. Envia o header `Origin` (o backend valida contra a allowlist
+ *     CORS_ALLOWED_ORIGINS/FRONTEND_ORIGIN — caso contrário responde 403).
+ *  3. Após `open`, envia o primeiro frame de autenticação:
+ *       {"type":"auth","payload":{"token":"<PAT>"}}
+ *  4. Aguarda o frame {"type":"auth_ack"} antes de processar eventos de negócio.
  *
- * O fallback por polling (quando o WS permanece indisponível) é tratado
- * fora desta classe, no `main.ts`, observando `isConnected()`.
+ * Eventos de negócio chegam como { type, payload, actor_id, actor_type }.
+ *
+ * Recursos: reconexão automática com backoff exponencial, ping periódico,
+ * timeout de autenticação e diagnóstico do handshake (loga status/corpo em
+ * caso de resposta inesperada — ex.: 400 por workspace ausente, 403 por origin).
  */
 export class MulticaWebSocket {
   private ws: WebSocket | null = null;
@@ -29,8 +39,9 @@ export class MulticaWebSocket {
   private readonly maxBackoffMs = 30_000;
   private pingTimer: NodeJS.Timeout | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private authTimer: NodeJS.Timeout | null = null;
   private closedByUser = false;
-  private connected = false;
+  private authenticated = false;
 
   /** Contador exposto para métricas (multica_ws_reconnects_total). */
   public reconnects = 0;
@@ -40,8 +51,9 @@ export class MulticaWebSocket {
     private readonly onEvent: EventHandler,
   ) {}
 
+  /** Considera "conectado" apenas após o auth_ack (conexão útil de fato). */
   isConnected(): boolean {
-    return this.connected;
+    return this.authenticated;
   }
 
   connect(): void {
@@ -55,33 +67,48 @@ export class MulticaWebSocket {
 
   private open(): void {
     const url = this.buildUrl();
-    logger.info({ url: this.maskUrl(url) }, 'Conectando ao WebSocket do Multica');
+    const origin = this.resolveOrigin();
+    logger.info({ url, origin }, 'Conectando ao WebSocket do Multica');
 
-    // Autenticação via header Authorization (Bearer) + header de workspace.
     const ws = new WebSocket(url, {
       headers: {
-        Authorization: `Bearer ${this.config.MULTICA_API_TOKEN}`,
-        'X-Workspace-Slug': this.config.MULTICA_WORKSPACE_SLUG,
-        'X-Client-Platform': 'telegram-bridge',
+        // Necessário para passar pela validação de Origin do backend.
+        Origin: origin,
+        'User-Agent': 'multica-telegram-bridge',
       },
       handshakeTimeout: 15_000,
     });
     this.ws = ws;
 
     ws.on('open', () => {
-      this.connected = true;
-      this.reconnectAttempts = 0;
-      logger.info('WebSocket conectado ao Multica');
-      this.startPing();
+      logger.info('WebSocket aberto — enviando frame de autenticação (token)');
+      this.sendAuthFrame();
+      this.startAuthTimeout();
     });
 
     ws.on('message', (data) => {
       void this.handleMessage(data.toString());
     });
 
+    // Diagnóstico: quando o servidor responde com um status HTTP em vez de
+    // 101 (ex.: 400/401/403), o corpo costuma explicar o motivo.
+    ws.on('unexpected-response', (_req, res: IncomingMessage) => {
+      let body = '';
+      res.on('data', (chunk) => {
+        body += chunk.toString();
+      });
+      res.on('end', () => {
+        logger.error(
+          { statusCode: res.statusCode, body: body.slice(0, 300) },
+          'WebSocket: handshake recusado pelo Multica',
+        );
+      });
+    });
+
     ws.on('close', (code) => {
-      this.connected = false;
+      this.authenticated = false;
       this.stopPing();
+      this.stopAuthTimeout();
       logger.warn({ code }, 'WebSocket desconectado');
       if (!this.closedByUser) this.scheduleReconnect();
     });
@@ -90,6 +117,15 @@ export class MulticaWebSocket {
       logger.error({ err: err.message }, 'Erro no WebSocket');
       // O evento 'close' cuidará do reconnect.
     });
+  }
+
+  /** Envia o primeiro frame de autenticação com o PAT. */
+  private sendAuthFrame(): void {
+    const frame = JSON.stringify({
+      type: 'auth',
+      payload: { token: this.config.MULTICA_API_TOKEN },
+    });
+    this.ws?.send(frame);
   }
 
   private async handleMessage(raw: string): Promise<void> {
@@ -101,7 +137,30 @@ export class MulticaWebSocket {
       return;
     }
 
-    // Filtra eventos de outros workspaces, se o ID estiver configurado.
+    // Fase de autenticação: só processamos eventos após o auth_ack.
+    if (!this.authenticated) {
+      if (event.type === 'auth_ack') {
+        this.authenticated = true;
+        this.reconnectAttempts = 0;
+        this.stopAuthTimeout();
+        this.startPing();
+        logger.info('WebSocket autenticado (auth_ack) — recebendo eventos');
+        return;
+      }
+      if (event.type === 'auth_error' || event.type === 'error') {
+        logger.error(
+          { reason: (event.payload as Record<string, unknown> | undefined)?.message },
+          'WebSocket: autenticação recusada pelo Multica (verifique o token/PAT)',
+        );
+        this.ws?.close();
+        return;
+      }
+      // Qualquer outro frame antes do ack é ignorado.
+      return;
+    }
+
+    // Filtra eventos de outros workspaces, se o ID estiver configurado e o
+    // evento carregar workspace_id explícito.
     if (
       this.config.MULTICA_WORKSPACE_ID &&
       event.workspace_id &&
@@ -122,8 +181,29 @@ export class MulticaWebSocket {
     this.reconnects += 1;
     this.reconnectAttempts += 1;
     const delay = Math.min(1000 * 2 ** this.reconnectAttempts, this.maxBackoffMs);
-    logger.info({ attempt: this.reconnectAttempts, delayMs: delay }, 'Reagendando reconexão do WebSocket');
+    logger.info(
+      { attempt: this.reconnectAttempts, delayMs: delay },
+      'Reagendando reconexão do WebSocket',
+    );
     this.reconnectTimer = setTimeout(() => this.open(), delay);
+  }
+
+  private startAuthTimeout(): void {
+    this.stopAuthTimeout();
+    // Se o auth_ack não chegar a tempo, derruba para reconectar.
+    this.authTimer = setTimeout(() => {
+      if (!this.authenticated) {
+        logger.warn('WebSocket: auth_ack não recebido a tempo — reconectando');
+        this.ws?.close();
+      }
+    }, 10_000);
+  }
+
+  private stopAuthTimeout(): void {
+    if (this.authTimer) {
+      clearTimeout(this.authTimer);
+      this.authTimer = null;
+    }
   }
 
   private startPing(): void {
@@ -140,35 +220,47 @@ export class MulticaWebSocket {
     }
   }
 
+  /**
+   * Monta a URL de upgrade com os query params esperados pelo Multica:
+   * `workspace_slug` (e `workspace_id`, se houver), `client_platform` e
+   * `client_version`. O token NÃO é incluído na URL.
+   */
   private buildUrl(): string {
-    // Permite passar o token na query como fallback, caso o backend não
-    // aceite header no handshake (alguns proxies removem headers).
     const url = new URL(this.config.MULTICA_WS_URL);
-    if (!url.searchParams.has('token')) {
-      url.searchParams.set('token', this.config.MULTICA_API_TOKEN);
+    url.searchParams.set('workspace_slug', this.config.MULTICA_WORKSPACE_SLUG);
+    if (this.config.MULTICA_WORKSPACE_ID) {
+      url.searchParams.set('workspace_id', this.config.MULTICA_WORKSPACE_ID);
     }
-    if (this.config.MULTICA_WORKSPACE_SLUG) {
-      url.searchParams.set('workspace', this.config.MULTICA_WORKSPACE_SLUG);
-    }
+    url.searchParams.set('client_platform', this.config.MULTICA_WS_CLIENT_PLATFORM);
+    url.searchParams.set('client_version', this.config.MULTICA_WS_CLIENT_VERSION);
+    // Remove um eventual token legado deixado na URL por engano.
+    url.searchParams.delete('token');
+    url.searchParams.delete('workspace');
     return url.toString();
   }
 
-  /** Remove o token da URL para registro seguro em log. */
-  private maskUrl(url: string): string {
+  /**
+   * Resolve o Origin a ser enviado no handshake. Usa MULTICA_WS_ORIGIN se
+   * definido; caso contrário, deriva de MULTICA_WS_URL (ws->http, wss->https),
+   * que normalmente coincide com a origem do frontend do Multica.
+   */
+  private resolveOrigin(): string {
+    if (this.config.MULTICA_WS_ORIGIN) return this.config.MULTICA_WS_ORIGIN;
     try {
-      const u = new URL(url);
-      if (u.searchParams.has('token')) u.searchParams.set('token', '***');
-      return u.toString();
+      const u = new URL(this.config.MULTICA_WS_URL);
+      const scheme = u.protocol === 'wss:' ? 'https:' : 'http:';
+      return `${scheme}//${u.host}`;
     } catch {
-      return '(url inválida)';
+      return '';
     }
   }
 
   close(): void {
     this.closedByUser = true;
     this.stopPing();
+    this.stopAuthTimeout();
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.ws?.close();
-    this.connected = false;
+    this.authenticated = false;
   }
 }
