@@ -48,6 +48,13 @@ const envSchema = z
       .string({ required_error: 'MULTICA_API_BASE_URL é obrigatório.' })
       .url('MULTICA_API_BASE_URL deve ser uma URL válida.'),
     MULTICA_WS_URL: z.string().optional().default(''),
+    // Origin enviado no handshake do WebSocket. O backend do Multica valida
+    // o header Origin contra uma allowlist (CORS_ALLOWED_ORIGINS/FRONTEND_ORIGIN).
+    // Se vazio, é derivado de MULTICA_WS_URL (ws->http, wss->https, sem path).
+    MULTICA_WS_ORIGIN: z.string().optional().default(''),
+    // Identificação do cliente enviada como query params no upgrade.
+    MULTICA_WS_CLIENT_PLATFORM: z.string().optional().default('telegram-bridge'),
+    MULTICA_WS_CLIENT_VERSION: z.string().optional().default('1.0.0'),
     MULTICA_API_TOKEN: z
       .string({ required_error: 'MULTICA_API_TOKEN é obrigatório.' })
       .min(8, 'MULTICA_API_TOKEN parece inválido.'),

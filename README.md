@@ -194,7 +194,10 @@ Todas as variáveis estão documentadas em [`.env.example`](./.env.example). As 
 
 | Variável | Padrão | Descrição |
 |----------|--------|-----------|
-| `MULTICA_WS_URL` | — | `ws://` ou `wss://` (obrigatório se WebSocket ativo) |
+| `MULTICA_WS_URL` | — | `ws://` ou `wss://` no endpoint `/ws` (obrigatório se WebSocket ativo) |
+| `MULTICA_WS_ORIGIN` | derivado | `Origin` do handshake; precisa estar na allowlist do Multica |
+| `MULTICA_WS_CLIENT_PLATFORM` | `telegram-bridge` | Enviado como query no upgrade |
+| `MULTICA_WS_CLIENT_VERSION` | `1.0.0` | Enviado como query no upgrade |
 | `MULTICA_WORKSPACE_ID` | — | Usado para filtrar eventos do WebSocket |
 | `BRIDGE_ENABLE_WEBSOCKET` | `true` | Habilita conexão em tempo real |
 | `BRIDGE_ENABLE_POLLING_FALLBACK` | `true` | Fallback quando o WS cai |
@@ -402,8 +405,22 @@ Antes do uso em produção, valide na instância alvo do Multica (planejamento, 
 | `Health check do Multica falhou` | URL/token inválidos ou backend fora | Verifique `MULTICA_API_BASE_URL` e `MULTICA_API_TOKEN` |
 | Bot não responde | Usuário fora da allowlist | Adicione seu ID em `TELEGRAM_ALLOWED_USER_IDS` |
 | `/squads` vazio | Rota indisponível na versão | Valide `GET /api/squads` na instância |
-| WebSocket desconectado | Proxy sem upgrade ou token recusado | Ajuste o proxy / use `wss://` / valide auth do `/ws` |
+| WebSocket `handshake recusado` **400** | Workspace ausente na URL | O bridge já envia `workspace_slug`; confira `MULTICA_WORKSPACE_SLUG` |
+| WebSocket `handshake recusado` **403** | `Origin` fora da allowlist | Defina `MULTICA_WS_ORIGIN` e adicione-o ao `CORS_ALLOWED_ORIGINS`/`FRONTEND_ORIGIN` do Multica |
+| WebSocket `autenticação recusada` | PAT inválido/sem acesso | Verifique o `MULTICA_API_TOKEN` e seu acesso ao workspace |
+| WebSocket desconectado | Proxy sem upgrade | Configure o *upgrade* WebSocket no Nginx/Caddy/Traefik e use `wss://` |
 | Sem notificações | `BRIDGE_NOTIFICATION_CHAT_ID` ausente | Configure o chat de notificações |
+
+### Protocolo do WebSocket do Multica
+
+O endpoint `/ws` do Multica autentica em **modo token (PAT)** assim (compatível com os clientes oficiais web/mobile):
+
+1. Upgrade em `wss://host/ws?workspace_slug=<slug>&client_platform=telegram-bridge&client_version=<v>` — **o token nunca vai na URL**.
+2. Header `Origin` validado contra a allowlist do backend (`CORS_ALLOWED_ORIGINS`/`FRONTEND_ORIGIN`).
+3. Primeiro frame enviado pelo bridge: `{"type":"auth","payload":{"token":"<PAT>"}}`.
+4. O backend responde `{"type":"auth_ack"}` e então passa a enviar os eventos de negócio (`{type, payload, actor_id, actor_type}`).
+
+O bridge implementa exatamente esse fluxo e registra o status/corpo do handshake quando ele é recusado, facilitando o diagnóstico.
 
 ---
 
