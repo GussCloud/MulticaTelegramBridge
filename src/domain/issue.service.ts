@@ -45,34 +45,37 @@ export class IssueService {
     }
     const mention = mentionMatch[1]!;
 
-    // Remove a menção do texto e analisa o restante.
+    // Remove a menção do texto e analisa o restante (título | descrição | prioridade).
     const rest = text.replace(mentionMatch[0], '').trim();
+    const fields = this.parseIssueFields(rest);
+    return { mention, ...fields };
+  }
 
-    if (rest.includes('|')) {
-      const parts = rest.split('|').map((p) => p.trim());
+  /**
+   * Faz o parse dos campos da issue a partir de um texto sem menção:
+   *   "Título | Descrição | prioridade"  ou  "Título" (formato simples).
+   * Usado tanto pelo comando quanto pelo fluxo por botões.
+   */
+  parseIssueFields(rest: string): { title: string; description: string; priority: IssuePriority } {
+    const text = rest.trim();
+    if (text.includes('|')) {
+      const parts = text.split('|').map((p) => p.trim());
       const title = parts[0] ?? '';
       const description = parts[1] ?? '';
       const priorityRaw = (parts[2] ?? 'medium').toLowerCase();
       if (!title) {
-        throw new ValidationError('❌ Título é obrigatório. Ex.: /nova-issue @claude | Título | Descrição | high');
+        throw new ValidationError('❌ Título é obrigatório. Ex.: Título | Descrição | high');
       }
       const priority = PriorityEnum.safeParse(priorityRaw);
-      return {
-        mention,
-        title,
-        description,
-        priority: priority.success ? priority.data : 'medium',
-      };
+      return { title, description, priority: priority.success ? priority.data : 'medium' };
     }
 
     // Formato simples: o restante vira o título.
-    const title = rest.trim();
+    const title = text;
     if (!title) {
-      throw new ValidationError(
-        '❌ Descreva a issue. Ex.: /nova-issue @claude Corrigir erro na tela de login',
-      );
+      throw new ValidationError('❌ Descreva a issue. Ex.: Corrigir erro na tela de login');
     }
-    return { mention, title, description: '', priority: 'medium' };
+    return { title, description: '', priority: 'medium' };
   }
 
   /** Cria uma issue atribuída a um agente ou squad resolvido por menção. */
@@ -90,6 +93,28 @@ export class IssueService {
     });
 
     return { issue, assigneeName: resolved.name };
+  }
+
+  /**
+   * Cria uma issue para um assignee já conhecido (fluxo por botões), a partir
+   * de um texto com os campos "Título | Descrição | prioridade".
+   */
+  async createForAssignee(
+    assigneeType: 'agent' | 'squad',
+    assigneeId: string,
+    assigneeName: string,
+    rawFields: string,
+  ): Promise<{ issue: Issue; assigneeName: string }> {
+    const fields = this.parseIssueFields(rawFields);
+    const issue = await this.client.createIssue({
+      title: fields.title,
+      description: fields.description,
+      status: 'todo',
+      priority: fields.priority,
+      assignee_type: assigneeType,
+      assignee_id: assigneeId,
+    });
+    return { issue, assigneeName };
   }
 
   /**

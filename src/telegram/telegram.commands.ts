@@ -71,8 +71,8 @@ export function registerCommands(bot: Telegraf, services: CommandServices): void
   const max = services.config.BRIDGE_MAX_MESSAGE_LENGTH;
 
   // ----------------------------- Básicos ------------------------------
+  // /start e /menu são tratados em registerMenu (exibem o menu de botões).
 
-  bot.start(handler(max, async (ctx) => reply(ctx, HELP_TEXT, max)));
   bot.help(handler(max, async (ctx) => reply(ctx, HELP_TEXT, max)));
 
   bot.command('status', handler(max, async (ctx) => {
