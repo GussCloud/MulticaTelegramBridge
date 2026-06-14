@@ -147,15 +147,21 @@ export class MulticaWebSocket {
         logger.info('WebSocket autenticado (auth_ack) — recebendo eventos');
         return;
       }
-      if (event.type === 'auth_error' || event.type === 'error') {
+      // O backend sinaliza falha com um frame { "error": "..." } (sem campo
+      // "type"): "invalid token", "not a member of this workspace", etc.
+      const errorReason =
+        (event as { error?: unknown }).error ??
+        (event.payload as Record<string, unknown> | undefined)?.message;
+      if (errorReason !== undefined || event.type === 'auth_error' || event.type === 'error') {
         logger.error(
-          { reason: (event.payload as Record<string, unknown> | undefined)?.message },
-          'WebSocket: autenticação recusada pelo Multica (verifique o token/PAT)',
+          { reason: errorReason ?? 'desconhecido' },
+          'WebSocket: autenticação recusada pelo Multica',
         );
-        this.ws?.close();
+        this.ws?.terminate();
         return;
       }
-      // Qualquer outro frame antes do ack é ignorado.
+      // Qualquer outro frame inesperado antes do ack: registra para diagnóstico.
+      logger.warn({ frame: raw.slice(0, 200) }, 'WebSocket: frame inesperado antes do auth_ack');
       return;
     }
 
@@ -190,13 +196,14 @@ export class MulticaWebSocket {
 
   private startAuthTimeout(): void {
     this.stopAuthTimeout();
-    // Se o auth_ack não chegar a tempo, derruba para reconectar.
+    // Se o auth_ack não chegar a tempo, derruba para reconectar. Usamos
+    // terminate() para não aguardar o close handshake de um servidor mudo.
     this.authTimer = setTimeout(() => {
       if (!this.authenticated) {
         logger.warn('WebSocket: auth_ack não recebido a tempo — reconectando');
-        this.ws?.close();
+        this.ws?.terminate();
       }
-    }, 10_000);
+    }, 12_000);
   }
 
   private stopAuthTimeout(): void {
@@ -222,20 +229,22 @@ export class MulticaWebSocket {
 
   /**
    * Monta a URL de upgrade com os query params esperados pelo Multica:
-   * `workspace_slug` (e `workspace_id`, se houver), `client_platform` e
-   * `client_version`. O token NÃO é incluído na URL.
+   * `workspace_slug`, `client_platform` e `client_version` — exatamente como
+   * o cliente web/mobile oficial. O token NÃO é incluído na URL.
+   *
+   * Importante: enviamos apenas `workspace_slug` (e deixamos o backend
+   * resolver o ID). Enviar um `workspace_id` configurado errado/desatualizado
+   * teria precedência sobre o slug e quebraria a verificação de membership.
    */
   private buildUrl(): string {
     const url = new URL(this.config.MULTICA_WS_URL);
     url.searchParams.set('workspace_slug', this.config.MULTICA_WORKSPACE_SLUG);
-    if (this.config.MULTICA_WORKSPACE_ID) {
-      url.searchParams.set('workspace_id', this.config.MULTICA_WORKSPACE_ID);
-    }
     url.searchParams.set('client_platform', this.config.MULTICA_WS_CLIENT_PLATFORM);
     url.searchParams.set('client_version', this.config.MULTICA_WS_CLIENT_VERSION);
-    // Remove um eventual token legado deixado na URL por engano.
+    // Remove params legados deixados na URL por engano.
     url.searchParams.delete('token');
     url.searchParams.delete('workspace');
+    url.searchParams.delete('workspace_id');
     return url.toString();
   }
 
